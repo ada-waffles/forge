@@ -133,6 +133,12 @@ public class SDisplayUtil {
         }
         return null;
     }
+    
+    public static GraphicsDevice getGraphicsDevice(final Window window) {
+        //Use current actual bounds rather than saved normal bounds, as the window could be maximized/fullscreen
+        //on a different monitor than when it was last normal
+        return getGraphicsDevice(window.getBounds());
+    }
 
     public static GraphicsDevice getGraphicsDevice(final Rectangle rect) {
         return getGraphicsDevice(new Point(rect.x + (rect.width / 2), rect.y + (rect.height / 2)));
@@ -163,21 +169,52 @@ public class SDisplayUtil {
         bounds.height -= screenInsets.top + screenInsets.bottom;
         return bounds;
     }
-
-    public static boolean setFullScreenWindow(final FFrame frame, final boolean fullScreen) {
-        return setFullScreenWindow(getGraphicsDevice(frame.getNormalBounds()), frame, fullScreen);
+    
+    public static boolean windowIsFullScreen(final Window window) {
+        return windowIsFullScreen(window, getGraphicsDevice(window));
     }
 
+    public static boolean windowIsFullScreen(final Window window, final GraphicsDevice gd) {
+        return gd.getFullScreenWindow() == window;
+    }
+
+    /**
+     * Attempts to set the full-screen state of a window
+     *
+     * @param frame The FFrame to make full-screen
+     * @param fullScreen
+     * If true, attempts to make the window full-screen. If false, reverts the window if it is currently full-screen.
+     *
+     * @return True if the full-screen state of the window was changed. False if it remained the same.
+     */
+    public static boolean setFullScreenWindow(final FFrame frame, final boolean fullScreen) {
+        return setFullScreenWindow(getGraphicsDevice(frame), frame, fullScreen);
+    }
+
+    /**
+     * Attempts to set the full-screen state of a window
+     * 
+     * @param gd The GraphicsDevice to full-screen to
+     * @param window The Window to make full-screen
+     * @param fullScreen
+     * If true, attempts to make the window full-screen. If false, reverts the window if it is currently full-screen.
+     * 
+     * @return True if the full-screen state of the window was changed. False if it remained the same.
+     */
     private static boolean setFullScreenWindow(final GraphicsDevice gd, final Window window, final boolean fullScreen) {
         if (gd != null && gd.isFullScreenSupported()) {
-            if (fullScreen) {
+            final boolean currentlyFullScreen = windowIsFullScreen(window, gd);
+            
+            if (fullScreen && !currentlyFullScreen) {
                 gd.setFullScreenWindow(window);
+                return true;
             }
-            else if (gd.getFullScreenWindow() == window) {
+            else if (!fullScreen && currentlyFullScreen) {
                 gd.setFullScreenWindow(null);
+                return true;
             }
-            return true;
         }
+        
         return false;
     }
 }

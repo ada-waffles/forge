@@ -7,12 +7,7 @@ import java.awt.Frame;
 import java.awt.Image;
 import java.awt.Point;
 import java.awt.Rectangle;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
-import java.awt.event.MouseMotionAdapter;
-import java.awt.event.WindowAdapter;
-import java.awt.event.WindowEvent;
-import java.awt.event.WindowStateListener;
+import java.awt.event.*;
 
 import javax.swing.BorderFactory;
 import javax.swing.JRootPane;
@@ -42,7 +37,7 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
     private boolean moveInProgress;
     private int resizeCursor;
     private FTitleBarBase titleBar;
-    private boolean minimized, maximized, fullScreen, hideBorder, lockTitleBar, hideTitleBar, isMainFrame, paused;
+    private boolean hideBorder, lockTitleBar, hideTitleBar, isMainFrame, paused;
     private Rectangle normalBounds;
 
     public FFrame() {
@@ -57,6 +52,7 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
         this.hideTitleBar = true; //ensure titlebar shown when window layout loaded
         this.lockTitleBar = this.isMainFrame && FModel.getPreferences().getPrefBoolean(FPref.UI_LOCK_TITLE_BAR);
         addResizeSupport();
+
         this.addWindowListener(new WindowAdapter() {
             @Override
             public void windowActivated(final WindowEvent e) {
@@ -68,16 +64,48 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
                 if (e.getOppositeWindow() == null) {
                     pause(); //pause music when main frame loses focus to outside application
 
-                    if (fullScreen) {
+                    if (isFullScreen()) {
                         setMinimized(true); //minimize if switching from Full Screen Forge to outside application window
                     }
                 }
             }
         });
-        this.addWindowStateListener(new WindowStateListener() {
+
+        //Any time the window is (un)maximized, (un)minimized, moved, or resized, update the border and title bar.
+        
+        addWindowStateListener((final WindowEvent e) -> {
+            updateBorder();
+            updateTitleBar();
+        });
+
+        //There is unfortunately no direct event for the fullscreen state, but it's a reasonable assumption that
+        //if the user/window manager (un-)full-screens the window outside of our control that the window's bounds
+        //will change as a result (and hopefully that will fire the ComponentListener).
+        //To avoid lots of wasted cycles on continuous changes, these event listeners need to be debounced.
+        //Use a trailing debounce so the window reflects the full-screen state change immediately.
+        addComponentListener(new ComponentAdapter() {
+            private final long DEBOUNCE_INTERVAL_MS = 750;
+            private volatile long lastCalled = 0;
+            
+            private void debouncedUpdate() {
+                final long callTime = System.currentTimeMillis();
+                
+                if (callTime - lastCalled > DEBOUNCE_INTERVAL_MS) {
+                    updateBorder();
+                    updateTitleBar();
+                }
+                
+                lastCalled = callTime;
+            }
+            
             @Override
-            public void windowStateChanged(final WindowEvent e) {
-                setState(e.getNewState());
+            public void componentMoved(final ComponentEvent e) {
+                debouncedUpdate();
+            }
+            
+            @Override
+            public void componentResized(final ComponentEvent e) {
+                debouncedUpdate();
             }
         });
 
@@ -139,7 +167,7 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
 
     private void updateTitleBar() {
         this.titleBar.updateButtons();
-        if (this.hideTitleBar == (this.fullScreen && !this.lockTitleBar)) {
+        if (this.hideTitleBar == (isFullScreen() && !this.lockTitleBar)) {
             return;
         }
         this.hideTitleBar = !this.hideTitleBar;
@@ -188,111 +216,125 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
     }
 
     private void resetState() {
-        if (this.minimized || this.maximized || this.fullScreen) {
-            this.minimized = false;
-            this.maximized = false;
-            if (this.fullScreen) { //need to cancel full screen here
-                SDisplayUtil.setFullScreenWindow(this, false);
-                this.fullScreen = false;
-            }
-            updateState();
-        }
+        setExtendedState(Frame.NORMAL);
+        setFullScreen(false);
     }
 
-    public void setWindowLayout(final int x, final int y, final int width, final int height, final boolean maximized0, final boolean fullScreen0) {
-        this.normalBounds = new Rectangle(x, y, width, height);
-        this.maximized = maximized0;
-        this.fullScreen = fullScreen0;
-        updateState();
+    public void setWindowLayout(
+        final int x,
+        final int y,
+        final int width,
+        final int height,
+        final boolean maximized,
+        final boolean fullScreen
+    ) {
+        setNormalBounds(new Rectangle(x, y, width, height));
+        setMaximized(maximized);
+        setFullScreen(fullScreen);
     }
 
+    /**
+     * @return the bounds used by this window when not maximized or full-screen
+     */
     public Rectangle getNormalBounds() {
         return this.normalBounds;
     }
 
-    public void updateNormalBounds() {
-        if (this.minimized || this.maximized || this.fullScreen) {
-            return;
+    /**
+     * Sets the bounds the window will use when not maximized or fullscreen
+     * 
+     * @param bounds The bounds to apply
+     */
+    public void setNormalBounds(final Rectangle bounds) {
+        normalBounds = bounds;
+        
+        if (!isMaximized() && !isFullScreen()) {
+            applyNormalBounds();
         }
-        this.normalBounds = this.getBounds();
+    }
+
+    /**
+     * Updates the window's normal bounds from the window manager if the window is currently normal
+     */
+    public void updateNormalBounds() {
+        if (isNormal()) {
+            normalBounds = this.getBounds();
+        }
+    }
+
+    /**
+     * Sets the window's bounds to equal its normal bounds (if not null)
+     */
+    public void applyNormalBounds() {
+        if (normalBounds != null) {
+            setBounds(normalBounds);
+        }
     }
 
     @Override
     public boolean isMinimized() {
-        return this.minimized;
+        return (getExtendedState() & Frame.ICONIFIED) == Frame.ICONIFIED;
     }
 
     @Override
     public void setMinimized(final boolean minimized0) {
-        if (this.minimized == minimized0) { return; }
-        this.minimized = minimized0;
-        updateState();
-
-        //pause or resume when minimized changes
         if (minimized0) {
-            pause();
+            setExtendedState(getExtendedState() | Frame.ICONIFIED);
         }
         else {
-            resume();
+            setExtendedState(getExtendedState() & ~Frame.ICONIFIED);
         }
     }
 
     @Override
     public boolean isMaximized() {
-        return this.maximized;
+        return (getExtendedState() & Frame.MAXIMIZED_BOTH) == Frame.MAXIMIZED_BOTH;
     }
 
     @Override
     public void setMaximized(final boolean maximized0) {
-        if (this.maximized == maximized0) { return; }
-        this.maximized = maximized0;
-        updateState();
+        if (maximized0) {
+            setExtendedState(getExtendedState() | Frame.MAXIMIZED_BOTH);
+        }
+        else {
+            applyNormalBounds();
+            setExtendedState(getExtendedState() & ~Frame.MAXIMIZED_BOTH);
+        }
     }
 
     @Override
     public boolean isFullScreen() {
-        return this.fullScreen;
+        return SDisplayUtil.windowIsFullScreen(this);
     }
 
     @Override
     public void setFullScreen(final boolean fullScreen0) {
-        if (this.fullScreen == fullScreen0) { return; }
-        this.fullScreen = fullScreen0;
-        if (!fullScreen0) { //cancel full screen here instead of updateState
-            SDisplayUtil.setFullScreenWindow(this, false);
+        //For some reason, setting fullscreen can also cause the maximized state to be set
+        //(This mainly seems to happen when the window is fullscreen on launch),
+        //So save and restore that state when going full-screen.
+        final boolean wasMaximized = isMaximized();
+        
+        final boolean fullScreenChanged = SDisplayUtil.setFullScreenWindow(this, fullScreen0);
+        
+        if (fullScreenChanged) {
+            setMaximized(wasMaximized);
+            
+            //If coming out of fullscreen, also restore the normal bounds
+            if (!fullScreen0) {
+                applyNormalBounds();
+            }
         }
-        updateState();
     }
 
-    private void updateState() {
-        if (this.minimized) {
-            super.setExtendedState(Frame.ICONIFIED);
-            return;
-        }
-        updateBorder();
-        updateTitleBar();
-
-        super.setExtendedState(Frame.NORMAL);
-
-        if (this.fullScreen) {
-            if (SDisplayUtil.setFullScreenWindow(this, true)) {
-                return; //nothing else needed if full-screen successful
-            }
-            this.fullScreen = false; //reset if full screen failed
-            updateBorder(); //ensure border updated for non-full screen if needed
-            updateTitleBar(); //ensure titlebar updated for non-full screen if needed
-        }
-
-        if (this.maximized) {
-            this.setBounds(SDisplayUtil.getScreenMaximizedBounds(this.normalBounds));
-        }
-        else {
-            this.setBounds(this.normalBounds);
-        }
+    /**
+     * @return whether the window is currently normal (that is, not minimized, maximized, or full-screen)
+     */
+    public boolean isNormal() {
+        return getExtendedState() == Frame.NORMAL && !isFullScreen();
     }
 
     private void updateBorder() {
-        if (this.minimized || this.hideBorder == (this.maximized || this.fullScreen)) {
+        if (isMinimized() || this.hideBorder == (isMaximized() || isFullScreen())) {
             return; //don't update border if minimized or border visibility wouldn't change
         }
         this.hideBorder = !this.hideBorder;
@@ -306,30 +348,11 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
         }
     }
 
-    //override normal state behavior
-    @Override
-    public synchronized void setState(final int state) {
-        setMinimized(state == Frame.ICONIFIED);
-        if (state == Frame.MAXIMIZED_BOTH) {
-            this.setMaximized(true);
-        }
-    }
-
-    //override normal extended state behavior
-    @Override
-    public void setExtendedState(final int state) {
-        if (this.isActive()) { //only update state set this way when active, otherwise window will be minimized when deactivated
-            this.minimized = (state & Frame.ICONIFIED) == Frame.ICONIFIED;
-            this.maximized = (state & Frame.MAXIMIZED_BOTH) == Frame.MAXIMIZED_BOTH;
-            updateState();
-        }
-    }
-
     private void addMoveSupport() {
         this.titleBar.addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(final MouseEvent e) {
-                if (SwingUtilities.isLeftMouseButton(e) && !fullScreen) { //don't allow moving or restore down when Full Screen
+                if (SwingUtilities.isLeftMouseButton(e) && !isFullScreen()) { //don't allow moving or restore down when Full Screen
                     if (e.getClickCount() == 1) {
                         locBeforeMove = getLocation();
                         mouseDownLoc = e.getLocationOnScreen();
@@ -403,7 +426,7 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
         resizeBorders.addMouseMotionListener(new MouseMotionAdapter() {
             @Override
             public void mouseMoved(final MouseEvent e) {
-                if (mouseDownLoc == null && !maximized) {
+                if (mouseDownLoc == null && !isMaximized()) {
                     final int grabArea = borderThickness * 2;
                     final Point loc = e.getPoint();
                     if (loc.x < grabArea) {
