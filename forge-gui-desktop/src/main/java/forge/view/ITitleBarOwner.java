@@ -17,6 +17,13 @@ public interface ITitleBarOwner {
 
     void setFullScreen(boolean b);
 
+    /**
+     * @return
+     * whether to apply the restrictions of macOS fullscreen mode:
+     * minimizing fullscreen windows is not allowed and the title bar cannot be hidden
+     */
+    boolean macosFullScreenRules();
+
     boolean getLockTitleBar();
 
     void setLockTitleBar(boolean b);

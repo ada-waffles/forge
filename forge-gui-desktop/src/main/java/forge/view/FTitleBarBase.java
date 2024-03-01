@@ -85,7 +85,8 @@ public abstract class FTitleBarBase extends SkinnedMenuBar {
     
     public void updateButtons() {
         boolean fullScreen = owner.isFullScreen();
-        btnLockTitleBar.setVisible(fullScreen);
+        btnLockTitleBar.setVisible(fullScreen && !owner.macosFullScreenRules());
+        btnMinimize.setVisible(!fullScreen || !owner.macosFullScreenRules());
         btnMaximize.setVisible(!fullScreen);
 
         if (fullScreen) {

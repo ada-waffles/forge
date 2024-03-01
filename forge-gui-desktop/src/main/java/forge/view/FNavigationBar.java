@@ -104,7 +104,6 @@ public class FNavigationBar extends FTitleBarBase {
         super.addControls();
 
         add(clock);
-        layout.putConstraint(SpringLayout.EAST, clock, -6, SpringLayout.WEST, btnLockTitleBar);
         layout.putConstraint(SpringLayout.SOUTH, clock, -5, SpringLayout.SOUTH, this);
         updateClockVisibility();
     }
@@ -197,6 +196,8 @@ public class FNavigationBar extends FTitleBarBase {
     //only show clock if Full Screen
     private void updateClockVisibility() {
         clock.setVisible(this.owner.isFullScreen());
+        final TitleBarButton anchor = owner.macosFullScreenRules() ? btnFullScreen : btnLockTitleBar;
+        layout.putConstraint(SpringLayout.EAST, clock, -6, SpringLayout.WEST, anchor);
     }
 
     private void addForgeButtonListeners() {

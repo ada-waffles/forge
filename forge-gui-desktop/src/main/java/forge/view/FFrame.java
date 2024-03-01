@@ -1,13 +1,10 @@
 package forge.view;
 
-import java.awt.Color;
-import java.awt.Cursor;
-import java.awt.Dimension;
-import java.awt.Frame;
-import java.awt.Image;
-import java.awt.Point;
-import java.awt.Rectangle;
+import java.awt.*;
 import java.awt.event.*;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 
 import javax.swing.BorderFactory;
 import javax.swing.JRootPane;
@@ -27,6 +24,9 @@ import forge.toolbox.FSkin.Colors;
 import forge.toolbox.FSkin.CompoundSkinBorder;
 import forge.toolbox.FSkin.LineSkinBorder;
 import forge.toolbox.FSkin.SkinnedFrame;
+import forge.util.OSUtil;
+import forge.util.OSUtil.OS;
+import forge.util.ThreadUtil;
 
 @SuppressWarnings("serial")
 public class FFrame extends SkinnedFrame implements ITitleBarOwner {
@@ -39,6 +39,29 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
     private FTitleBarBase titleBar;
     private boolean hideBorder, lockTitleBar, hideTitleBar, isMainFrame, paused;
     private Rectangle normalBounds;
+
+    /**
+     * On some platforms, state such as maximized is lost when minimizing a window,
+     * so store the state here when minimizing to restore later
+     */
+    private int preMinimizeState = 0;
+
+    /**
+     * Used to track full-screen state on macOS, since its APIs do not allow polling the current state of the window
+     */
+    private Boolean macosFullScreen = null;
+
+    /**
+     * If true, setFullScreen(true) was called before setVisible(true), which does not work on macOS.
+     * The window will be made full-screen once it is made visible.
+     */
+    private boolean macosFullScreenPending = false;
+
+    /**
+     * Stores what the bounds were before entering macOS fullscreen mode.
+     * This is separate from normalBounds because "maximized" on macOS doesn't really exist as a separate state.
+     */
+    private Rectangle macosPreFullScreenBounds = null;
 
     public FFrame() {
         setUndecorated(true);
@@ -64,16 +87,23 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
                 if (e.getOppositeWindow() == null) {
                     pause(); //pause music when main frame loses focus to outside application
 
-                    if (isFullScreen()) {
-                        setMinimized(true); //minimize if switching from Full Screen Forge to outside application window
+                    //Minimize if switching from Full Screen Forge to outside application window, if allowed
+                    if (isFullScreen() && !macosFullScreenRules()) {
+                        setMinimized(true);
                     }
                 }
             }
         });
 
-        //Any time the window is (un)maximized, (un)minimized, moved, or resized, update the border and title bar.
-        
+
         addWindowStateListener((final WindowEvent e) -> {
+            final boolean wasMinimized = (e.getOldState() & Frame.ICONIFIED) == Frame.ICONIFIED;
+            final boolean isMinimized = (e.getNewState() & Frame.ICONIFIED) == Frame.ICONIFIED;
+            if (wasMinimized && !isMinimized) {
+                setExtendedState(preMinimizeState);
+            }
+
+            //Any time the window is (un)maximized, (un)minimized, moved, or resized, update the border and title bar.
             updateBorder();
             updateTitleBar();
         });
@@ -109,9 +139,119 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
             }
         });
 
+        //If we're running on a Mac, hook up the macOS-specific fullscreen APIs
+        if (OSUtil.detectOS() == OS.MAC_OS) {
+            try {
+                //The native fullscreen APIs on macOS are available through Apple classes which only exist on macOS.
+                //Accessing them via reflection allows the code to compile cross-platform.
+                //See: https://stackoverflow.com/a/30090377
+                final Class<?> fullScreenUtilitiesClass =
+                    Class.forName("com.apple.eawt.FullScreenUtilities");
+                final Class<?> fullScreenListenerInterface =
+                    Class.forName("com.apple.eawt.FullScreenListener");
+
+                //macOS fullscreen must be enabled before it can be used. This only needs to be done once.
+                final Method setWindowCanFullScreen = fullScreenUtilitiesClass.getMethod(
+                    "setWindowCanFullScreen",
+                    Window.class,
+                    boolean.class
+                );
+                setWindowCanFullScreen.invoke(fullScreenUtilitiesClass, this, true);
+
+                //Add an event listener so we know if we're in fullscreen currently or not
+                //(There's unfortunately no way to check on-demand)
+                final Method addFullScreenListenerMethod = fullScreenUtilitiesClass.getMethod(
+                    "addFullScreenListenerTo",
+                    Window.class,
+                    fullScreenListenerInterface
+                );
+
+                final Object proxySubject = new Object();
+                final Object fullScreenListener = Proxy.newProxyInstance(
+                    fullScreenListenerInterface.getClassLoader(),
+                    new Class[] {fullScreenListenerInterface},
+                    (proxy, method, args) -> {
+                        //Handle the java.lang.Object methods
+                        if (method.getDeclaringClass() == Object.class) return method.invoke(proxySubject, args);
+
+                        switch (method.getName()) {
+                            //Using "entering" and "exiting" events rather than "entered" and "exited"
+                            //because it makes the animations look better, if still sorta jank
+                            case "windowEnteringFullScreen":
+                                macosFullScreen = true;
+
+                                //The macOS fullscreen mechanism strangely does not
+                                //automatically extend the bounds of the window,
+                                //so we need to manually set the bounds to the size of the screen
+                                //when entering fullscreen mode, and then restore them on the way out.
+                                //Doing this here in the event listener instead of the setFullscreen method
+                                //so that the macosFullScreen flag will be accurate
+                                //and normalBounds will not be incorrectly overwritten.
+                                macosPreFullScreenBounds = getBounds();
+                                final Rectangle fullScreenBounds =
+                                    SDisplayUtil.getGraphicsDevice(this).getDefaultConfiguration().getBounds();
+                                setBounds(fullScreenBounds);
+
+                                break;
+                            case "windowExitingFullScreen":
+                                macosFullScreen = false;
+
+                                if (macosPreFullScreenBounds != null) {
+                                    setBounds(macosPreFullScreenBounds);
+                                    macosPreFullScreenBounds = null;
+                                }
+                                else {
+                                    //Fallback, just in case
+                                    applyNormalBounds();
+                                }
+
+                                break;
+                        }
+
+                        updateBorder();
+                        updateTitleBar();
+
+                        return null; //All the listener methods return void
+                    }
+                );
+
+                addFullScreenListenerMethod.invoke(fullScreenUtilitiesClass, this, fullScreenListener);
+
+                //If all was successful, then initialize macOS fullscreen state to false
+                macosFullScreen = false;
+            }
+            catch (
+                ClassNotFoundException
+                | NoSuchMethodException
+                | SecurityException
+                | IllegalAccessException
+                | InvocationTargetException ex
+            ) {
+                System.err.println("Unable to initialize macOS fullscreen API. Will attempt to use Java fullscreen.");
+                ex.printStackTrace();
+            }
+        }
+
         // Title bar
         this.titleBar = titleBar0;
         addMoveSupport();
+    }
+
+    @Override
+    public void setVisible(final boolean visible) {
+        super.setVisible(visible);
+
+        if (macosFullScreenPending) {
+            //If the window's non-full-screen state is maximized, Swing needs a moment to correctly position the window
+            //before full-screening it. Otherwise, it will be positioned wrong when exiting full-screen.
+            //Also, this makes the opening fullscreen animation look more correct.
+            ThreadUtil.delay(100, () -> {
+                SwingUtilities.invokeLater(() -> {
+                    setFullScreen(true);
+                    macosFullScreenPending = false;
+                });
+            });
+        }
     }
 
     private void pause() {
@@ -167,10 +307,9 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
 
     private void updateTitleBar() {
         this.titleBar.updateButtons();
-        if (this.hideTitleBar == (isFullScreen() && !this.lockTitleBar)) {
-            return;
-        }
-        this.hideTitleBar = !this.hideTitleBar;
+        final boolean shouldHideTitleBar = !macosFullScreenRules() && isFullScreen() && !getLockTitleBar();
+        if (this.hideTitleBar == shouldHideTitleBar) return;
+        this.hideTitleBar = shouldHideTitleBar;
         this.titleBar.setVisible(!this.hideTitleBar);
         if (this.isMainFrame) {
             SResizingUtil.resizeWindow(); //ensure window layout updated to account for titlebar visibility change
@@ -278,11 +417,14 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
 
     @Override
     public void setMinimized(final boolean minimized0) {
+        if (minimized0 == isMinimized()) return;
+
         if (minimized0) {
-            setExtendedState(getExtendedState() | Frame.ICONIFIED);
+            preMinimizeState = getExtendedState();
+            setExtendedState(preMinimizeState | Frame.ICONIFIED);
         }
         else {
-            setExtendedState(getExtendedState() & ~Frame.ICONIFIED);
+            setExtendedState(preMinimizeState);
         }
     }
 
@@ -304,24 +446,58 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
 
     @Override
     public boolean isFullScreen() {
-        return SDisplayUtil.windowIsFullScreen(this);
+        if (macosFullScreen != null) return macosFullScreen;
+        else return SDisplayUtil.windowIsFullScreen(this);
+    }
+
+    @Override
+    public boolean macosFullScreenRules() {
+        return macosFullScreen != null;
     }
 
     @Override
     public void setFullScreen(final boolean fullScreen0) {
-        //For some reason, setting fullscreen can also cause the maximized state to be set
-        //(This mainly seems to happen when the window is fullscreen on launch),
-        //So save and restore that state when going full-screen.
-        final boolean wasMaximized = isMaximized();
-        
-        final boolean fullScreenChanged = SDisplayUtil.setFullScreenWindow(this, fullScreen0);
-        
-        if (fullScreenChanged) {
-            setMaximized(wasMaximized);
-            
-            //If coming out of fullscreen, also restore the normal bounds
-            if (!fullScreen0) {
-                applyNormalBounds();
+        if (macosFullScreen != null) {
+            if (macosFullScreen == fullScreen0) return;
+
+            if (!isVisible() && fullScreen0) {
+                macosFullScreenPending = true;
+                return;
+            }
+
+            try {
+                final Class<?> appleApplicationClass = Class.forName("com.apple.eawt.Application");
+                final Method getApplication = appleApplicationClass.getMethod("getApplication");
+                final Object application = getApplication.invoke(appleApplicationClass);
+                final Method requestToggleFulLScreen =
+                    application.getClass().getMethod("requestToggleFullScreen", Window.class);
+                requestToggleFulLScreen.invoke(application, this);
+            }
+            catch (
+                ClassNotFoundException
+                | NoSuchMethodException
+                | IllegalAccessException
+                | InvocationTargetException ex
+            ) {
+                System.err.println("Unable to enter macOS fullscreen");
+                ex.printStackTrace();
+            }
+        }
+        else {
+            //For some reason, setting fullscreen can also cause the maximized state to be set
+            //(This mainly seems to happen when the window is fullscreen on launch),
+            //So save and restore that state when going full-screen.
+            final boolean wasMaximized = isMaximized();
+
+            final boolean fullScreenChanged = SDisplayUtil.setFullScreenWindow(this, fullScreen0);
+
+            if (fullScreenChanged) {
+                setMaximized(wasMaximized);
+
+                //If coming out of fullscreen, also restore the normal bounds
+                if (!fullScreen0) {
+                    applyNormalBounds();
+                }
             }
         }
     }

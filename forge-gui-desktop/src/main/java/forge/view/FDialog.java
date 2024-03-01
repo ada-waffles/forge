@@ -510,6 +510,9 @@ public class FDialog extends SkinnedDialog implements ITitleBarOwner, KeyEventDi
     }
 
     @Override
+    public boolean macosFullScreenRules() { return false; }
+
+    @Override
     public void setFullScreen(final boolean b) {
     }
 
