@@ -439,8 +439,8 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
             setExtendedState(getExtendedState() | Frame.MAXIMIZED_BOTH);
         }
         else {
-            applyNormalBounds();
             setExtendedState(getExtendedState() & ~Frame.MAXIMIZED_BOTH);
+            applyNormalBounds();
         }
     }
 
