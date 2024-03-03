@@ -254,6 +254,18 @@ public class FFrame extends SkinnedFrame implements ITitleBarOwner {
         }
     }
 
+    @Override
+    public void setExtendedState(final int state) {
+        if (OSUtil.detectOS() == OS.WINDOWS && (state & Frame.MAXIMIZED_BOTH) == Frame.MAXIMIZED_BOTH) {
+            //Maximizing an undecorated Swing window on Windows does not correctly respect the taskbar.
+            //However, you can tell Swing what the maximized bounds for the window should be.
+            //See: https://stackoverflow.com/questions/6422931/why-jframe-hides-taskbar-when-maximized
+            setMaximizedBounds(SDisplayUtil.getScreenMaximizedBounds(getBounds()));
+        }
+
+        super.setExtendedState(state);
+    }
+
     private void pause() {
         if (paused || !isMainFrame) { return; }
 
